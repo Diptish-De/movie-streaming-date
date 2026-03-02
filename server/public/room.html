@@ -43,7 +43,6 @@
             flex-direction: column;
         }
 
-        /* TOPBAR */
         .topbar {
             display: flex;
             align-items: center;
@@ -139,14 +138,12 @@
             box-shadow: 0 4px 15px var(--glow);
         }
 
-        /* MAIN BODY */
         .main-body {
             display: flex;
             flex: 1;
             overflow: hidden;
         }
 
-        /* VIDEO AREA */
         .video-area {
             flex: 1;
             display: flex;
@@ -171,7 +168,6 @@
             background: #000;
         }
 
-        /* Loader */
         .video-loader {
             position: absolute;
             inset: 0;
@@ -316,7 +312,6 @@
             display: none;
         }
 
-        /* Sync / sharing indicators */
         .sync-indicator {
             position: absolute;
             top: 12px;
@@ -408,7 +403,43 @@
             }
         }
 
-        /* SIDEBAR */
+        /* Waiting overlay for viewers */
+        .waiting-overlay {
+            position: absolute;
+            inset: 0;
+            display: none;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+            background: rgba(6, 6, 18, 0.95);
+            z-index: 4;
+        }
+
+        .waiting-overlay.show {
+            display: flex;
+        }
+
+        .waiting-spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid var(--bg3);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        .waiting-text {
+            font-size: 14px;
+            color: var(--text2);
+        }
+
         .sidebar {
             width: 360px;
             background: var(--bg2);
@@ -656,7 +687,6 @@
             display: none;
         }
 
-        /* Floats */
         .float-container {
             position: fixed;
             left: 0;
@@ -778,11 +808,10 @@
                 <button class="share-btn" onclick="copyLink()">📤 Share Link</button>
             </div>
         </div>
-
         <div class="main-body">
             <div class="video-area" id="videoArea">
                 <div class="video-player">
-                    <video id="mainVideo" controls></video>
+                    <video id="mainVideo" controls autoplay></video>
                     <div class="video-loader" id="videoLoader">
                         <div class="loader-icon">🎬</div>
                         <div class="loader-title">Load a Video</div>
@@ -803,6 +832,11 @@
                             <button class="url-load-btn" onclick="loadUrl()">Load Video</button>
                         </div>
                     </div>
+                    <!-- Waiting for stream overlay -->
+                    <div class="waiting-overlay" id="waitingOverlay">
+                        <div class="waiting-spinner"></div>
+                        <div class="waiting-text" id="waitingText">Connecting to screen share...</div>
+                    </div>
                     <div class="drop-overlay" id="dropOverlay"><span>📁 Drop video here</span></div>
                     <div class="sync-indicator" id="syncIndicator"></div>
                     <button class="stop-sharing-bar" id="stopSharingBar" onclick="stopScreenShare()">🛑 Stop
@@ -812,7 +846,6 @@
                 </div>
                 <input type="file" id="fileInput" accept="video/*" onchange="loadFile(event)">
             </div>
-
             <div class="sidebar">
                 <div class="sidebar-header">💬 Chat</div>
                 <div class="sidebar-users" id="usersBar"></div>
@@ -847,7 +880,6 @@
             </div>
         </div>
     </div>
-
     <div class="float-container" id="floatContainer"></div>
     <div class="toast" id="toast"></div>
 
@@ -861,16 +893,24 @@
 
         let socket = null, users = [], roomCode = '';
         let isRemoteAction = false, lastSyncTime = 0;
-
-        // Voice
         let isVoiceActive = false, isMuted = false, localStream = null, peerConnections = new Map();
-
-        // Screen sharing
-        let screenStream = null, isScreenSharing = false;
-        let screenPeerConnections = new Map();
+        let screenStream = null, isScreenSharing = false, screenPeerConnections = new Map();
 
         const video = document.getElementById('mainVideo');
-        const ICE = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }] };
+
+        // Free TURN + STUN servers for cross-network WebRTC
+        const ICE = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' },
+                { urls: 'stun:stun2.l.google.com:19302' },
+                { urls: 'stun:stun3.l.google.com:19302' },
+                { urls: 'stun:stun4.l.google.com:19302' },
+                { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+                { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+                { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' }
+            ]
+        };
 
         // ===== VIDEO LOADING =====
         function loadFile(e) {
@@ -879,13 +919,10 @@
             document.getElementById('videoLoader').classList.add('hidden');
             addSystemMessage('Video loaded: ' + f.name);
         }
-
         function toggleUrlInput() { document.getElementById('urlInputWrap').classList.toggle('show'); }
-
         function loadUrl() {
             const url = document.getElementById('urlInput').value.trim(); if (!url) return;
-            video.src = url;
-            document.getElementById('videoLoader').classList.add('hidden');
+            video.src = url; document.getElementById('videoLoader').classList.add('hidden');
             addSystemMessage('Video loaded from URL');
             if (socket) socket.emit('share-video-url', { url });
         }
@@ -905,38 +942,30 @@
         video.addEventListener('pause', () => { if (!isRemoteAction && socket) socket.emit('sync-pause', { currentTime: video.currentTime }); });
         video.addEventListener('seeked', () => { if (isRemoteAction) return; const now = Date.now(); if (now - lastSyncTime < 500) return; lastSyncTime = now; if (socket) socket.emit('sync-seek', { currentTime: video.currentTime }); });
 
-        // ===== SCREEN SHARING =====
+        // ===== SCREEN SHARING (HOST) =====
         async function startScreenShare() {
             try {
                 screenStream = await navigator.mediaDevices.getDisplayMedia({ video: { cursor: 'always' }, audio: true });
                 isScreenSharing = true;
-
-                // Show locally (muted so host hears from original tab)
-                video.srcObject = screenStream;
-                video.muted = true;
-                video.play().catch(() => { });
+                video.srcObject = screenStream; video.muted = true; video.play().catch(() => { });
                 document.getElementById('videoLoader').classList.add('hidden');
                 document.getElementById('stopSharingBar').classList.add('show');
                 document.getElementById('liveBadge').classList.add('show');
                 document.getElementById('liveLabel').textContent = 'SHARING';
                 addSystemMessage('You started sharing your screen 🖥️');
-
-                // Notify room
                 socket.emit('screen-share-start');
-
-                // Send stream to each viewer
-                users.forEach(u => {
-                    if (u.nickname !== nickname) sendScreenTo(u.socketId);
-                });
-
-                // Handle browser stop button
+                // Send to all current viewers
+                users.forEach(u => { if (u.nickname !== nickname) sendScreenTo(u.socketId); });
+                // Handle browser stop
                 screenStream.getVideoTracks()[0].addEventListener('ended', stopScreenShare);
-            } catch (err) {
-                addSystemMessage('Screen share cancelled');
-            }
+            } catch (err) { addSystemMessage('Screen share cancelled'); }
         }
 
         function sendScreenTo(peerId) {
+            // Close existing connection to this peer if any
+            if (screenPeerConnections.has(peerId)) {
+                screenPeerConnections.get(peerId).close();
+            }
             const pc = new RTCPeerConnection(ICE);
             screenPeerConnections.set(peerId, pc);
             screenStream.getTracks().forEach(t => pc.addTrack(t, screenStream));
@@ -946,8 +975,7 @@
 
         function stopScreenShare() {
             if (screenStream) { screenStream.getTracks().forEach(t => t.stop()); screenStream = null; }
-            isScreenSharing = false;
-            video.srcObject = null; video.muted = false;
+            isScreenSharing = false; video.srcObject = null; video.muted = false;
             document.getElementById('videoLoader').classList.remove('hidden');
             document.getElementById('stopSharingBar').classList.remove('show');
             document.getElementById('liveBadge').classList.remove('show');
@@ -970,19 +998,33 @@
                     document.getElementById('roomBadge').textContent = roomCode;
                     document.title = 'Watch Party — ' + roomCode;
                     socket.emit('join-room', { roomCode, nickname }, res => {
-                        if (res.success) { updateUsers(res.users); addSystemMessage('You joined the party! 🎉'); }
-                        else addSystemMessage(res.error || 'Failed to join');
+                        if (res.success) {
+                            updateUsers(res.users);
+                            addSystemMessage('You joined the party! 🎉');
+
+                            // If someone is already sharing, show waiting and request stream
+                            if (res.screenSharer) {
+                                addSystemMessage(res.screenSharerName + ' is sharing their screen 🖥️');
+                                document.getElementById('videoLoader').classList.add('hidden');
+                                document.getElementById('waitingOverlay').classList.add('show');
+                                document.getElementById('waitingText').textContent = 'Connecting to ' + res.screenSharerName + "'s screen...";
+                                document.getElementById('liveBadge').classList.add('show');
+                                document.getElementById('liveLabel').textContent = res.screenSharerName + ' • LIVE';
+                                // Ask the sharer to send us the stream
+                                socket.emit('request-screen', { to: res.screenSharer });
+                            }
+                        } else addSystemMessage(res.error || 'Failed to join');
                     });
                 }
             });
 
             socket.on('disconnect', () => addSystemMessage('Disconnected...'));
-            socket.on('user-joined', ({ nickname: n, users: u }) => {
+
+            socket.on('user-joined', ({ nickname: n, users: u, socketId: sid }) => {
                 updateUsers(u); addSystemMessage(n + ' joined! 🎉');
-                // If we're sharing, send screen to new user
+                // If we're sharing, send screen to the new joiner
                 if (isScreenSharing && screenStream) {
-                    const newUser = u.find(x => x.nickname === n);
-                    if (newUser) sendScreenTo(newUser.socketId);
+                    sendScreenTo(sid);
                 }
             });
             socket.on('user-left', ({ nickname: n, users: u }) => { updateUsers(u); addSystemMessage(n + ' left 👋'); });
@@ -995,10 +1037,12 @@
             socket.on('sync-seek', ({ currentTime, from }) => { isRemoteAction = true; video.currentTime = currentTime; setTimeout(() => isRemoteAction = false, 500); showSyncIndicator(from + ' ⏩'); });
             socket.on('share-video-url', ({ url }) => { video.src = url; document.getElementById('videoLoader').classList.add('hidden'); addSystemMessage('Video loaded from shared URL'); });
 
-            // Screen sharing (viewer side)
+            // Screen sharing (viewer events)
             socket.on('screen-share-start', ({ from, nickname: n }) => {
                 addSystemMessage(n + ' is sharing their screen 🖥️');
                 document.getElementById('videoLoader').classList.add('hidden');
+                document.getElementById('waitingOverlay').classList.add('show');
+                document.getElementById('waitingText').textContent = 'Connecting to ' + n + "'s screen...";
                 document.getElementById('liveBadge').classList.add('show');
                 document.getElementById('liveLabel').textContent = n + ' • LIVE';
             });
@@ -1008,16 +1052,46 @@
                 video.srcObject = null;
                 document.getElementById('videoLoader').classList.remove('hidden');
                 document.getElementById('liveBadge').classList.remove('show');
+                document.getElementById('waitingOverlay').classList.remove('show');
                 screenPeerConnections.forEach(pc => pc.close()); screenPeerConnections.clear();
             });
 
-            socket.on('screen-offer', async ({ from, offer }) => {
+            // Host receives request from late joiner
+            socket.on('request-screen', ({ from }) => {
+                if (isScreenSharing && screenStream) {
+                    console.log('Late joiner requesting screen, sending to:', from);
+                    sendScreenTo(from);
+                }
+            });
+
+            socket.on('screen-offer', async ({ from, offer, nickname: n }) => {
+                console.log('Received screen offer from:', n || from);
                 const pc = new RTCPeerConnection(ICE);
                 screenPeerConnections.set(from, pc);
-                pc.ontrack = e => { video.srcObject = e.streams[0]; video.play().catch(() => { }); };
-                pc.onicecandidate = e => { if (e.candidate) socket.emit('screen-ice-candidate', { to: from, candidate: e.candidate }); };
+
+                pc.ontrack = e => {
+                    console.log('Got screen track!');
+                    video.srcObject = e.streams[0];
+                    video.play().catch(() => { });
+                    // Hide loader AND waiting overlay — we got the stream!
+                    document.getElementById('videoLoader').classList.add('hidden');
+                    document.getElementById('waitingOverlay').classList.remove('show');
+                };
+
+                pc.onicecandidate = e => {
+                    if (e.candidate) socket.emit('screen-ice-candidate', { to: from, candidate: e.candidate });
+                };
+
+                pc.onconnectionstatechange = () => {
+                    console.log('Screen PC state:', pc.connectionState);
+                    if (pc.connectionState === 'failed') {
+                        addSystemMessage('Screen connection failed. Try refreshing.');
+                    }
+                };
+
                 await pc.setRemoteDescription(new RTCSessionDescription(offer));
-                const answer = await pc.createAnswer(); await pc.setLocalDescription(answer);
+                const answer = await pc.createAnswer();
+                await pc.setLocalDescription(answer);
                 socket.emit('screen-answer', { to: from, answer: pc.localDescription });
             });
 
@@ -1049,14 +1123,12 @@
         function addSystemMessage(t) { const c = document.getElementById('chatMessages'); const e = c.querySelector('.chat-empty'); if (e) e.remove(); const d = document.createElement('div'); d.className = 'system-msg'; d.textContent = t; c.appendChild(d); c.scrollTop = c.scrollHeight; }
         document.getElementById('chatInput').addEventListener('keydown', e => { if (e.key === 'Enter') sendMessage(); });
 
-        // ===== REACTIONS =====
         function sendReaction(emoji) { if (socket) socket.emit('reaction', { emoji }); }
         function showFloatingReaction(emoji, name) {
             const c = document.getElementById('floatContainer'); const el = document.createElement('div'); el.className = 'float-emoji';
             el.innerHTML = `<span class="float-emoji-icon">${emoji}</span><span class="float-emoji-name">${escapeHtml(name)}</span>`;
             el.style.left = `${Math.random() * 60 + 20}%`; c.appendChild(el); setTimeout(() => el.remove(), 4000);
         }
-
         function showSyncIndicator(t) { const el = document.getElementById('syncIndicator'); el.textContent = t; el.classList.add('show'); setTimeout(() => el.classList.remove('show'), 2500); }
         function copyLink() { const url = window.location.origin + '/room/' + roomCode; navigator.clipboard.writeText(url).then(() => showToast('Link copied! 🎉')).catch(() => prompt('Copy:', url)); }
 

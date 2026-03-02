@@ -54,6 +54,8 @@ io.on('connection', (socket) => {
     const room = {
       host: socket.id,
       users: new Map(),
+      screenSharer: null,       // track who is sharing
+      screenSharerName: null,
       createdAt: Date.now()
     };
     room.users.set(socket.id, { nickname, socketId: socket.id });
@@ -89,6 +91,7 @@ io.on('connection', (socket) => {
 
     const usersList = Array.from(room.users.values());
 
+    // Notify existing users
     socket.to(code).emit('user-joined', {
       nickname,
       socketId: socket.id,
@@ -97,10 +100,13 @@ io.on('connection', (socket) => {
 
     console.log(`👋 ${nickname} joined room ${code} (${usersList.length} users)`);
 
+    // Send join response WITH screen sharing state
     callback({
       success: true,
       roomCode: code,
-      users: usersList
+      users: usersList,
+      screenSharer: room.screenSharer,
+      screenSharerName: room.screenSharerName
     });
   });
 
@@ -127,7 +133,6 @@ io.on('connection', (socket) => {
     socket.to(currentRoom).emit('sync-seek', { currentTime, from: currentNickname });
   });
 
-  // Countdown sync - everyone presses play at the same time
   socket.on('countdown-sync', () => {
     if (!currentRoom) return;
     io.to(currentRoom).emit('countdown-sync', { from: currentNickname });
@@ -163,6 +168,11 @@ io.on('connection', (socket) => {
   // ---------- SCREEN SHARING ----------
   socket.on('screen-share-start', () => {
     if (!currentRoom) return;
+    const room = rooms.get(currentRoom);
+    if (room) {
+      room.screenSharer = socket.id;
+      room.screenSharerName = currentNickname;
+    }
     socket.to(currentRoom).emit('screen-share-start', {
       from: socket.id,
       nickname: currentNickname
@@ -171,10 +181,20 @@ io.on('connection', (socket) => {
 
   socket.on('screen-share-stop', () => {
     if (!currentRoom) return;
+    const room = rooms.get(currentRoom);
+    if (room) {
+      room.screenSharer = null;
+      room.screenSharerName = null;
+    }
     socket.to(currentRoom).emit('screen-share-stop', {
       from: socket.id,
       nickname: currentNickname
     });
+  });
+
+  // Request host to send screen to a new joiner
+  socket.on('request-screen', ({ to }) => {
+    io.to(to).emit('request-screen', { from: socket.id, nickname: currentNickname });
   });
 
   socket.on('screen-offer', ({ to, offer }) => {
@@ -188,6 +208,8 @@ io.on('connection', (socket) => {
   socket.on('screen-ice-candidate', ({ to, candidate }) => {
     io.to(to).emit('screen-ice-candidate', { from: socket.id, candidate });
   });
+
+  // ---------- WEBRTC VOICE SIGNALING ----------
   socket.on('voice-offer', ({ to, offer }) => {
     io.to(to).emit('voice-offer', { from: socket.id, nickname: currentNickname, offer });
   });
@@ -217,6 +239,16 @@ io.on('connection', (socket) => {
       const room = rooms.get(currentRoom);
       room.users.delete(socket.id);
       const usersList = Array.from(room.users.values());
+
+      // If the screen sharer disconnects, clear screen state
+      if (room.screenSharer === socket.id) {
+        room.screenSharer = null;
+        room.screenSharerName = null;
+        io.to(currentRoom).emit('screen-share-stop', {
+          from: socket.id,
+          nickname: currentNickname
+        });
+      }
 
       socket.to(currentRoom).emit('user-left', {
         nickname: currentNickname,
