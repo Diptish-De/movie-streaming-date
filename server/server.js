@@ -160,7 +160,34 @@ io.on('connection', (socket) => {
     socket.to(currentRoom).emit('share-video-url', { url, from: currentNickname });
   });
 
-  // ---------- WEBRTC SIGNALING ----------
+  // ---------- SCREEN SHARING ----------
+  socket.on('screen-share-start', () => {
+    if (!currentRoom) return;
+    socket.to(currentRoom).emit('screen-share-start', {
+      from: socket.id,
+      nickname: currentNickname
+    });
+  });
+
+  socket.on('screen-share-stop', () => {
+    if (!currentRoom) return;
+    socket.to(currentRoom).emit('screen-share-stop', {
+      from: socket.id,
+      nickname: currentNickname
+    });
+  });
+
+  socket.on('screen-offer', ({ to, offer }) => {
+    io.to(to).emit('screen-offer', { from: socket.id, nickname: currentNickname, offer });
+  });
+
+  socket.on('screen-answer', ({ to, answer }) => {
+    io.to(to).emit('screen-answer', { from: socket.id, answer });
+  });
+
+  socket.on('screen-ice-candidate', ({ to, candidate }) => {
+    io.to(to).emit('screen-ice-candidate', { from: socket.id, candidate });
+  });
   socket.on('voice-offer', ({ to, offer }) => {
     io.to(to).emit('voice-offer', { from: socket.id, nickname: currentNickname, offer });
   });
