@@ -66,7 +66,6 @@
             background: linear-gradient(135deg, var(--accent), var(--accent2));
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
-            background-clip: text;
             text-decoration: none;
         }
 
@@ -161,37 +160,22 @@
             height: 100%;
             object-fit: contain;
             background: #000;
-            display: none;
         }
 
-        #mainVideo.active {
-            display: block;
-        }
-
-        /* Canvas for receiving stream frames */
-        #streamCanvas {
+        /* Viewer video for receiving stream */
+        #viewerVideo {
             width: 100%;
             height: 100%;
             object-fit: contain;
             background: #000;
             display: none;
+            position: absolute;
+            inset: 0;
         }
 
-        #streamCanvas.active {
+        #viewerVideo.active {
             display: block;
-        }
-
-        /* Img for receiving frames */
-        #streamImg {
-            width: 100%;
-            height: 100%;
-            object-fit: contain;
-            background: #000;
-            display: none;
-        }
-
-        #streamImg.active {
-            display: block;
+            z-index: 2;
         }
 
         .video-loader {
@@ -727,7 +711,7 @@
             background: rgba(136, 136, 170, 0.3);
         }
 
-        @media (max-width: 768px) {
+        @media (max-width:768px) {
             .main-body {
                 flex-direction: column;
             }
@@ -767,7 +751,7 @@
             <div class="video-area" id="videoArea">
                 <div class="video-player">
                     <video id="mainVideo" controls></video>
-                    <img id="streamImg" alt="">
+                    <video id="viewerVideo" autoplay playsinline></video>
                     <div class="video-loader" id="videoLoader">
                         <div class="loader-icon">🎬</div>
                         <div class="loader-title">Load a Video</div>
@@ -845,40 +829,37 @@
         let socket = null, users = [], roomCode = '';
         let isRemoteAction = false, lastSyncTime = 0;
         let isVoiceActive = false, isMuted = false, localStream = null, peerConnections = new Map();
-
-        // Screen sharing state
         let screenStream = null, isScreenSharing = false, mediaRecorder = null;
-        let captureCanvas = null, captureCtx = null, captureInterval = null;
 
         const video = document.getElementById('mainVideo');
-        const streamImg = document.getElementById('streamImg');
+        const viewerVideo = document.getElementById('viewerVideo');
         const ICE = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+
+        // MediaSource for viewer
+        let mediaSource = null, sourceBuffer = null, chunkQueue = [], isViewingStream = false;
 
         // ===== VIDEO LOADING =====
         function loadFile(e) {
             const f = e.target.files[0]; if (!f) return;
             video.src = URL.createObjectURL(f);
-            video.classList.add('active'); streamImg.classList.remove('active');
             document.getElementById('videoLoader').classList.add('hidden');
             addSystemMessage('Video loaded: ' + f.name);
         }
         function toggleUrlInput() { document.getElementById('urlInputWrap').classList.toggle('show'); }
         function loadUrl() {
             const url = document.getElementById('urlInput').value.trim(); if (!url) return;
-            video.src = url; video.classList.add('active'); streamImg.classList.remove('active');
-            document.getElementById('videoLoader').classList.add('hidden');
+            video.src = url; document.getElementById('videoLoader').classList.add('hidden');
             addSystemMessage('Video loaded from URL');
             if (socket) socket.emit('share-video-url', { url });
         }
 
-        // Drag & drop
         const videoArea = document.getElementById('videoArea');
         videoArea.addEventListener('dragover', e => { e.preventDefault(); document.getElementById('dropOverlay').classList.add('active'); });
         videoArea.addEventListener('dragleave', () => document.getElementById('dropOverlay').classList.remove('active'));
         videoArea.addEventListener('drop', e => {
             e.preventDefault(); document.getElementById('dropOverlay').classList.remove('active');
             const f = e.dataTransfer.files[0];
-            if (f && f.type.startsWith('video/')) { video.src = URL.createObjectURL(f); video.classList.add('active'); document.getElementById('videoLoader').classList.add('hidden'); addSystemMessage('Video loaded: ' + f.name); }
+            if (f && f.type.startsWith('video/')) { video.src = URL.createObjectURL(f); document.getElementById('videoLoader').classList.add('hidden'); addSystemMessage('Video loaded: ' + f.name); }
         });
 
         // ===== VIDEO SYNC =====
@@ -886,55 +867,48 @@
         video.addEventListener('pause', () => { if (!isRemoteAction && socket) socket.emit('sync-pause', { currentTime: video.currentTime }); });
         video.addEventListener('seeked', () => { if (isRemoteAction) return; const now = Date.now(); if (now - lastSyncTime < 500) return; lastSyncTime = now; if (socket) socket.emit('sync-seek', { currentTime: video.currentTime }); });
 
-        // ===== SCREEN SHARING (SERVER RELAY via canvas frames) =====
+        // ===== SCREEN SHARING (HOST) - uses MediaRecorder to stream via server =====
         async function startScreenShare() {
             try {
-                screenStream = await navigator.mediaDevices.getDisplayMedia({ video: { cursor: 'always', frameRate: 15 }, audio: true });
+                screenStream = await navigator.mediaDevices.getDisplayMedia({
+                    video: { cursor: 'always', width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 24 } },
+                    audio: true
+                });
                 isScreenSharing = true;
 
-                // Show screen locally in a video element for capturing
-                const localVid = document.createElement('video');
-                localVid.srcObject = screenStream;
-                localVid.muted = true;
-                localVid.play();
-
-                // Set up canvas to capture frames
-                captureCanvas = document.createElement('canvas');
-                captureCtx = captureCanvas.getContext('2d');
-
-                // Show the stream in the main video (host preview)
+                // Show locally
                 video.srcObject = screenStream; video.muted = true; video.play().catch(() => { });
-                video.classList.add('active'); streamImg.classList.remove('active');
                 document.getElementById('videoLoader').classList.add('hidden');
                 document.getElementById('stopSharingBar').classList.add('show');
                 document.getElementById('liveBadge').classList.add('show');
                 document.getElementById('liveLabel').textContent = 'SHARING';
-
                 socket.emit('screen-share-start');
                 addSystemMessage('You started sharing your screen 🖥️');
 
-                // Capture and send frames via Socket.io
-                captureInterval = setInterval(() => {
-                    if (!screenStream || !screenStream.active) { stopScreenShare(); return; }
-                    const track = screenStream.getVideoTracks()[0];
-                    if (!track) return;
-                    const settings = track.getSettings();
-                    // Scale down for bandwidth
-                    const scale = Math.min(1, 1280 / (settings.width || 1280));
-                    captureCanvas.width = (settings.width || 1280) * scale;
-                    captureCanvas.height = (settings.height || 720) * scale;
-                    captureCtx.drawImage(localVid, 0, 0, captureCanvas.width, captureCanvas.height);
-                    // Send as JPEG blob
-                    captureCanvas.toBlob((blob) => {
-                        if (blob && socket) {
-                            blob.arrayBuffer().then(buf => {
-                                socket.emit('stream-data', buf);
-                            });
-                        }
-                    }, 'image/jpeg', 0.6);
-                }, 150); // ~7fps for smooth but low bandwidth
+                // Use MediaRecorder to encode and send video chunks
+                const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp8,opus')
+                    ? 'video/webm;codecs=vp8,opus'
+                    : MediaRecorder.isTypeSupported('video/webm;codecs=vp8')
+                        ? 'video/webm;codecs=vp8'
+                        : 'video/webm';
 
-                // Handle browser stop
+                mediaRecorder = new MediaRecorder(screenStream, {
+                    mimeType: mimeType,
+                    videoBitsPerSecond: 800000 // 800kbps - good balance of quality and speed
+                });
+
+                mediaRecorder.ondataavailable = (e) => {
+                    if (e.data && e.data.size > 0 && socket) {
+                        e.data.arrayBuffer().then(buf => {
+                            socket.emit('stream-data', buf);
+                        });
+                    }
+                };
+
+                // Send chunks every 500ms for low latency
+                mediaRecorder.start(500);
+
+                // Handle browser stop button
                 screenStream.getVideoTracks()[0].addEventListener('ended', stopScreenShare);
             } catch (err) {
                 addSystemMessage('Screen share cancelled');
@@ -942,15 +916,115 @@
         }
 
         function stopScreenShare() {
-            if (captureInterval) { clearInterval(captureInterval); captureInterval = null; }
+            if (mediaRecorder && mediaRecorder.state !== 'inactive') { mediaRecorder.stop(); mediaRecorder = null; }
             if (screenStream) { screenStream.getTracks().forEach(t => t.stop()); screenStream = null; }
             isScreenSharing = false;
-            video.srcObject = null; video.muted = false; video.classList.remove('active');
+            video.srcObject = null; video.muted = false;
             document.getElementById('videoLoader').classList.remove('hidden');
             document.getElementById('stopSharingBar').classList.remove('show');
             document.getElementById('liveBadge').classList.remove('show');
             if (socket) socket.emit('screen-share-stop');
             addSystemMessage('Screen sharing stopped');
+        }
+
+        // ===== VIEWER: receive stream via MediaSource =====
+        function initViewerStream(sharerName) {
+            isViewingStream = true;
+            document.getElementById('videoLoader').classList.add('hidden');
+            viewerVideo.classList.add('active');
+            document.getElementById('liveBadge').classList.add('show');
+            document.getElementById('liveLabel').textContent = sharerName + ' • LIVE';
+
+            // Use MediaSource to play the webm chunks
+            if (MediaSource.isTypeSupported('video/webm;codecs=vp8,opus') || MediaSource.isTypeSupported('video/webm;codecs=vp8')) {
+                mediaSource = new MediaSource();
+                viewerVideo.src = URL.createObjectURL(mediaSource);
+
+                mediaSource.addEventListener('sourceopen', () => {
+                    const codec = MediaSource.isTypeSupported('video/webm;codecs=vp8,opus')
+                        ? 'video/webm;codecs=vp8,opus'
+                        : 'video/webm;codecs=vp8';
+                    try {
+                        sourceBuffer = mediaSource.addSourceBuffer(codec);
+                        sourceBuffer.mode = 'sequence';
+
+                        sourceBuffer.addEventListener('updateend', () => {
+                            // Process queued chunks
+                            if (chunkQueue.length > 0 && !sourceBuffer.updating) {
+                                const next = chunkQueue.shift();
+                                try { sourceBuffer.appendBuffer(next); } catch (e) { /* buffer full, skip */ }
+                            }
+                            // Keep buffer manageable - remove old data
+                            try {
+                                if (viewerVideo.currentTime > 10 && sourceBuffer.buffered.length > 0) {
+                                    sourceBuffer.remove(0, viewerVideo.currentTime - 5);
+                                }
+                            } catch (e) { }
+                        });
+
+                        sourceBuffer.addEventListener('error', (e) => {
+                            console.error('SourceBuffer error:', e);
+                        });
+                    } catch (e) {
+                        console.error('Failed to create source buffer:', e);
+                        // Fallback to blob URL approach
+                        useBlobFallback = true;
+                    }
+                });
+            } else {
+                useBlobFallback = true;
+            }
+        }
+
+        let useBlobFallback = false;
+        let blobParts = [];
+
+        function appendStreamChunk(data) {
+            if (useBlobFallback) {
+                // Fallback: accumulate and re-create blob URL periodically
+                blobParts.push(new Uint8Array(data));
+                return;
+            }
+
+            if (!sourceBuffer) {
+                chunkQueue.push(new Uint8Array(data));
+                return;
+            }
+
+            if (sourceBuffer.updating) {
+                // Queue it, but limit queue to avoid memory buildup
+                if (chunkQueue.length < 30) {
+                    chunkQueue.push(new Uint8Array(data));
+                }
+            } else {
+                try {
+                    sourceBuffer.appendBuffer(new Uint8Array(data));
+                } catch (e) {
+                    console.warn('Append failed:', e.message);
+                    // Try to recover by clearing buffer
+                    try {
+                        if (sourceBuffer.buffered.length > 0) {
+                            sourceBuffer.remove(0, sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1));
+                        }
+                    } catch (e2) { }
+                }
+            }
+
+            // Auto-play if paused
+            if (viewerVideo.paused) viewerVideo.play().catch(() => { });
+        }
+
+        function stopViewerStream() {
+            isViewingStream = false;
+            viewerVideo.classList.remove('active');
+            chunkQueue = [];
+            blobParts = [];
+            if (mediaSource && mediaSource.readyState === 'open') {
+                try { mediaSource.endOfStream(); } catch (e) { }
+            }
+            mediaSource = null; sourceBuffer = null;
+            document.getElementById('videoLoader').classList.remove('hidden');
+            document.getElementById('liveBadge').classList.remove('show');
         }
 
         // ===== SOCKET =====
@@ -972,10 +1046,7 @@
                             addSystemMessage('You joined the party! 🎉');
                             if (res.screenSharer) {
                                 addSystemMessage(res.screenSharerName + ' is sharing their screen 🖥️');
-                                document.getElementById('videoLoader').classList.add('hidden');
-                                streamImg.classList.add('active'); video.classList.remove('active');
-                                document.getElementById('liveBadge').classList.add('show');
-                                document.getElementById('liveLabel').textContent = res.screenSharerName + ' • LIVE';
+                                initViewerStream(res.screenSharerName);
                             }
                         } else addSystemMessage(res.error || 'Failed to join');
                     });
@@ -992,32 +1063,24 @@
             socket.on('sync-play', ({ currentTime, from }) => { isRemoteAction = true; if (Math.abs(video.currentTime - currentTime) > 2) video.currentTime = currentTime; video.play().catch(() => { }); setTimeout(() => isRemoteAction = false, 500); showSyncIndicator(from + ' ▶️'); });
             socket.on('sync-pause', ({ currentTime, from }) => { isRemoteAction = true; video.pause(); if (Math.abs(video.currentTime - currentTime) > 2) video.currentTime = currentTime; setTimeout(() => isRemoteAction = false, 500); showSyncIndicator(from + ' ⏸️'); });
             socket.on('sync-seek', ({ currentTime, from }) => { isRemoteAction = true; video.currentTime = currentTime; setTimeout(() => isRemoteAction = false, 500); showSyncIndicator(from + ' ⏩'); });
-            socket.on('share-video-url', ({ url }) => { video.src = url; video.classList.add('active'); streamImg.classList.remove('active'); document.getElementById('videoLoader').classList.add('hidden'); addSystemMessage('Video loaded from shared URL'); });
+            socket.on('share-video-url', ({ url }) => { video.src = url; document.getElementById('videoLoader').classList.add('hidden'); addSystemMessage('Video loaded from shared URL'); });
 
-            // Screen sharing (viewer)
+            // Screen share viewer events
             socket.on('screen-share-start', ({ nickname: n }) => {
                 addSystemMessage(n + ' is sharing their screen 🖥️');
-                document.getElementById('videoLoader').classList.add('hidden');
-                streamImg.classList.add('active'); video.classList.remove('active');
-                document.getElementById('liveBadge').classList.add('show');
-                document.getElementById('liveLabel').textContent = n + ' • LIVE';
+                initViewerStream(n);
             });
 
             socket.on('screen-share-stop', ({ nickname: n }) => {
                 addSystemMessage((n || 'Host') + ' stopped sharing');
-                streamImg.classList.remove('active'); streamImg.src = '';
-                document.getElementById('videoLoader').classList.remove('hidden');
-                document.getElementById('liveBadge').classList.remove('show');
+                stopViewerStream();
             });
 
-            // Receive stream frames (JPEG images via server relay)
+            // Receive encoded video chunks from server relay
             socket.on('stream-data', (data) => {
-                const blob = new Blob([data], { type: 'image/jpeg' });
-                const url = URL.createObjectURL(blob);
-                const oldUrl = streamImg.src;
-                streamImg.src = url;
-                // Clean up old blob URL
-                if (oldUrl && oldUrl.startsWith('blob:')) URL.revokeObjectURL(oldUrl);
+                if (!isScreenSharing) { // Only viewers process stream data
+                    appendStreamChunk(data);
+                }
             });
 
             // Voice
@@ -1050,7 +1113,7 @@
         function showSyncIndicator(t) { const el = document.getElementById('syncIndicator'); el.textContent = t; el.classList.add('show'); setTimeout(() => el.classList.remove('show'), 2500); }
         function copyLink() { const url = window.location.origin + '/room/' + roomCode; navigator.clipboard.writeText(url).then(() => showToast('Link copied! 🎉')).catch(() => prompt('Copy:', url)); }
 
-        // ===== VOICE (WebRTC P2P - works fine for audio) =====
+        // ===== VOICE =====
         async function toggleVoice() { isVoiceActive ? stopVoice() : await startVoice(); }
         async function startVoice() {
             try {
