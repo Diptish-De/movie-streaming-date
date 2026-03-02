@@ -2,9 +2,11 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
+const path = require('path');
 
 const app = express();
 app.use(cors());
+app.use(express.static(path.join(__dirname, 'public')));
 
 const server = http.createServer(app);
 const io = new Server(server, {
@@ -15,10 +17,10 @@ const io = new Server(server, {
 });
 
 // ========== ROOM MANAGEMENT ==========
-const rooms = new Map(); // roomCode -> { host, users: Map<socketId, {nickname, socketId}> }
+const rooms = new Map();
 
 function generateRoomCode() {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no confusing chars
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let code = '';
   for (let i = 0; i < 6; i++) {
     code += chars.charAt(Math.floor(Math.random() * chars.length));
@@ -26,13 +28,17 @@ function generateRoomCode() {
   return code;
 }
 
-// ========== HEALTH CHECK ==========
+// ========== ROUTES ==========
 app.get('/', (req, res) => {
-  res.json({
-    status: 'running',
-    rooms: rooms.size,
-    uptime: process.uptime()
-  });
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+app.get('/room/:code', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'room.html'));
+});
+
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'running', rooms: rooms.size, uptime: process.uptime() });
 });
 
 // ========== SOCKET.IO ==========
@@ -83,49 +89,48 @@ io.on('connection', (socket) => {
 
     const usersList = Array.from(room.users.values());
 
-    // Notify others in the room
     socket.to(code).emit('user-joined', {
       nickname,
       socketId: socket.id,
       users: usersList
     });
 
-    console.log(`👋 ${nickname} joined room ${code}`);
+    console.log(`👋 ${nickname} joined room ${code} (${usersList.length} users)`);
 
     callback({
       success: true,
       roomCode: code,
-      users: usersList,
-      isHost: false
+      users: usersList
     });
+  });
+
+  // ---------- CHECK ROOM ----------
+  socket.on('check-room', ({ roomCode }, callback) => {
+    const code = roomCode.toUpperCase().trim();
+    const room = rooms.get(code);
+    callback({ exists: !!room, userCount: room ? room.users.size : 0 });
   });
 
   // ---------- SYNC EVENTS ----------
   socket.on('sync-play', ({ currentTime }) => {
     if (!currentRoom) return;
-    console.log(`▶️ [${currentRoom}] ${currentNickname} played at ${currentTime.toFixed(1)}s`);
-    socket.to(currentRoom).emit('sync-play', {
-      currentTime,
-      from: currentNickname
-    });
+    socket.to(currentRoom).emit('sync-play', { currentTime, from: currentNickname });
   });
 
   socket.on('sync-pause', ({ currentTime }) => {
     if (!currentRoom) return;
-    console.log(`⏸️ [${currentRoom}] ${currentNickname} paused at ${currentTime.toFixed(1)}s`);
-    socket.to(currentRoom).emit('sync-pause', {
-      currentTime,
-      from: currentNickname
-    });
+    socket.to(currentRoom).emit('sync-pause', { currentTime, from: currentNickname });
   });
 
   socket.on('sync-seek', ({ currentTime }) => {
     if (!currentRoom) return;
-    console.log(`⏩ [${currentRoom}] ${currentNickname} seeked to ${currentTime.toFixed(1)}s`);
-    socket.to(currentRoom).emit('sync-seek', {
-      currentTime,
-      from: currentNickname
-    });
+    socket.to(currentRoom).emit('sync-seek', { currentTime, from: currentNickname });
+  });
+
+  // Countdown sync - everyone presses play at the same time
+  socket.on('countdown-sync', () => {
+    if (!currentRoom) return;
+    io.to(currentRoom).emit('countdown-sync', { from: currentNickname });
   });
 
   // ---------- CHAT ----------
@@ -149,27 +154,17 @@ io.on('connection', (socket) => {
     });
   });
 
-  // ---------- WEBRTC SIGNALING (Voice Chat) ----------
+  // ---------- WEBRTC SIGNALING ----------
   socket.on('voice-offer', ({ to, offer }) => {
-    io.to(to).emit('voice-offer', {
-      from: socket.id,
-      nickname: currentNickname,
-      offer
-    });
+    io.to(to).emit('voice-offer', { from: socket.id, nickname: currentNickname, offer });
   });
 
   socket.on('voice-answer', ({ to, answer }) => {
-    io.to(to).emit('voice-answer', {
-      from: socket.id,
-      answer
-    });
+    io.to(to).emit('voice-answer', { from: socket.id, answer });
   });
 
   socket.on('ice-candidate', ({ to, candidate }) => {
-    io.to(to).emit('ice-candidate', {
-      from: socket.id,
-      candidate
-    });
+    io.to(to).emit('ice-candidate', { from: socket.id, candidate });
   });
 
   socket.on('voice-toggle', ({ muted }) => {
@@ -188,7 +183,6 @@ io.on('connection', (socket) => {
     if (currentRoom && rooms.has(currentRoom)) {
       const room = rooms.get(currentRoom);
       room.users.delete(socket.id);
-
       const usersList = Array.from(room.users.values());
 
       socket.to(currentRoom).emit('user-left', {
@@ -197,56 +191,27 @@ io.on('connection', (socket) => {
         users: usersList
       });
 
-      // Delete room if empty
       if (room.users.size === 0) {
         rooms.delete(currentRoom);
         console.log(`🗑️ Room ${currentRoom} deleted (empty)`);
-      }
-      // Transfer host if host left
-      else if (room.host === socket.id) {
+      } else if (room.host === socket.id) {
         const newHost = room.users.keys().next().value;
         room.host = newHost;
         io.to(currentRoom).emit('host-changed', {
           newHostId: newHost,
           newHostNickname: room.users.get(newHost).nickname
         });
-        console.log(`👑 Host transferred in ${currentRoom}`);
       }
-    }
-  });
-
-  // ---------- LEAVE ROOM ----------
-  socket.on('leave-room', () => {
-    if (currentRoom && rooms.has(currentRoom)) {
-      const room = rooms.get(currentRoom);
-      room.users.delete(socket.id);
-      socket.leave(currentRoom);
-
-      const usersList = Array.from(room.users.values());
-
-      socket.to(currentRoom).emit('user-left', {
-        nickname: currentNickname,
-        socketId: socket.id,
-        users: usersList
-      });
-
-      if (room.users.size === 0) {
-        rooms.delete(currentRoom);
-      }
-
-      console.log(`🚪 ${currentNickname} left room ${currentRoom}`);
-      currentRoom = null;
-      currentNickname = null;
     }
   });
 });
 
-// ========== START SERVER ==========
+// ========== START ==========
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`
   🎬 Watch Party Server is running!
   🌐 http://localhost:${PORT}
-  📡 WebSocket ready for connections
+  📡 WebSocket ready
   `);
 });
