@@ -154,6 +154,12 @@ io.on('connection', (socket) => {
     });
   });
 
+  // ---------- VIDEO URL SHARING ----------
+  socket.on('share-video-url', ({ url }) => {
+    if (!currentRoom) return;
+    socket.to(currentRoom).emit('share-video-url', { url, from: currentNickname });
+  });
+
   // ---------- WEBRTC SIGNALING ----------
   socket.on('voice-offer', ({ to, offer }) => {
     io.to(to).emit('voice-offer', { from: socket.id, nickname: currentNickname, offer });
