@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Watch Party</title>
+  <link rel="stylesheet" href="popup.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+</head>
+
+<body>
+  <div class="popup-container">
+    <!-- Header -->
+    <div class="popup-header">
+      <div class="logo-row">
+        <span class="logo-icon">🎬</span>
+        <h1>Watch Party</h1>
+      </div>
+      <p class="tagline">Sync. Chat. React. Together.</p>
+    </div>
+
+    <!-- Connection Status -->
+    <div class="status-bar" id="statusBar">
+      <span class="status-dot" id="statusDot"></span>
+      <span class="status-text" id="statusText">Not on JioHotstar</span>
+    </div>
+
+    <!-- Home View -->
+    <div id="homeView" class="view active">
+      <div class="input-group">
+        <label for="nicknameInput">Your Nickname</label>
+        <input type="text" id="nicknameInput" placeholder="Enter your name..." maxlength="20" autocomplete="off">
+      </div>
+
+      <div class="button-group">
+        <button class="btn btn-primary" id="createRoomBtn">
+          <span class="btn-icon">🏠</span>
+          Create Room
+        </button>
+        <div class="divider"><span>or</span></div>
+        <div class="input-group">
+          <label for="roomCodeInput">Room Code</label>
+          <input type="text" id="roomCodeInput" placeholder="e.g. ABC123" maxlength="6" autocomplete="off"
+            style="text-transform: uppercase; letter-spacing: 3px; text-align: center; font-weight: 700;">
+        </div>
+        <button class="btn btn-secondary" id="joinRoomBtn">
+          <span class="btn-icon">🚀</span>
+          Join Room
+        </button>
+      </div>
+
+      <p class="error-msg" id="errorMsg"></p>
+    </div>
+
+    <!-- Room View -->
+    <div id="roomView" class="view">
+      <div class="room-info">
+        <div class="room-code-display">
+          <span class="room-label">Room Code</span>
+          <div class="room-code" id="roomCodeDisplay">------</div>
+          <button class="btn-copy" id="copyCodeBtn" title="Copy code">📋</button>
+        </div>
+      </div>
+
+      <div class="users-section">
+        <h3>👥 Watching Together</h3>
+        <div class="users-list" id="usersList"></div>
+      </div>
+
+      <button class="btn btn-danger" id="leaveRoomBtn">
+        <span class="btn-icon">🚪</span>
+        Leave Room
+      </button>
+    </div>
+
+    <!-- Server Config -->
+    <div class="server-config">
+      <details>
+        <summary>⚙️ Server</summary>
+        <div class="input-group" style="margin-top: 8px;">
+          <input type="text" id="serverUrl" value="https://watch-party-server.onrender.com" style="font-size: 11px;">
+          <button class="btn btn-small" id="saveServerBtn">Save</button>
+        </div>
+      </details>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+
+</html>
